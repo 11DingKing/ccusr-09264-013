@@ -12,6 +12,9 @@ from contextlib import AbstractContextManager
 from ..domain.models import (
     AuditEntry,
     Blob,
+    LineageBreak,
+    LineageEdge,
+    LineageNode,
     Material,
     MaterialVersion,
     Objection,
@@ -148,3 +151,30 @@ class Repository(abc.ABC):
     def list_audit(
         self, package_id: str | None = None, limit: int = 200
     ) -> list[AuditEntry]: ...
+
+    # ---- 材料谱系 ----
+    @abc.abstractmethod
+    def insert_lineage_node(self, node: LineageNode) -> None: ...
+
+    @abc.abstractmethod
+    def get_lineage_node(self, node_id: str) -> LineageNode | None: ...
+
+    @abc.abstractmethod
+    def list_lineage_nodes(
+        self, institution_id: str | None = None,
+    ) -> list[LineageNode]: ...
+
+    @abc.abstractmethod
+    def insert_lineage_edge(self, edge: LineageEdge) -> None: ...
+
+    @abc.abstractmethod
+    def list_lineage_edges_by_child(self, child_id: str) -> list[LineageEdge]:
+        """某节点的全部上游来源边（反查与成环检查都走这里）。"""
+    @abc.abstractmethod
+    def record_lineage_break(self, brk: LineageBreak) -> bool:
+        """追加断链标记；同一断点已记录时返回 False（幂等）。"""
+    @abc.abstractmethod
+    def list_lineage_breaks(
+        self, node_id: str | None = None
+    ) -> list[LineageBreak]:
+        """断链标记；node_id 非空时限定以其为下游或缺失环节的断点。"""

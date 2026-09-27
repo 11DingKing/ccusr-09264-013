@@ -146,5 +146,54 @@ class AuditEntry:
     detail: dict = field(default_factory=dict)
 
 
+@dataclass
+class LineageNode:
+    """谱系节点：原始材料、中间产物或成品。
+
+    节点只能由登记用例显式创建；反查发现上游缺失时绝不补造节点，
+    而是以 LineageBreak 标记断链。
+    """
+
+    node_id: str
+    institution_id: str
+    kind: str                      # LineageNodeKind
+    name: str
+    detail: dict = field(default_factory=dict)
+    created_by: str = ""
+    created_at: str = ""
+
+
+@dataclass
+class LineageEdge:
+    """来源关系：child 经 process（中间处理环节）由 parent 得到。
+
+    parent_id 允许指向尚未登记的节点——这正是断链的来源；
+    登记边时不校验 parent 存在，也绝不自动补造。
+    """
+
+    edge_id: str
+    child_id: str                  # 下游节点（加工结果）
+    parent_id: str                 # 上游来源（可能未登记 -> 断链）
+    process: str                   # 中间处理环节（如 切割/热处理/混料）
+    recorded_by: str
+    recorded_at: str
+
+
+@dataclass
+class LineageBreak:
+    """断链标记：反查时发现某条边的上游节点未登记。
+
+    追加式标记（同一断点只记一次）；缺失节点事后被显式登记时
+    标记保留为历史，查询侧以 resolved 注解呈现。
+    """
+
+    break_id: str
+    edge_id: str
+    child_id: str                  # 从哪个节点继续反查时断掉
+    missing_node_id: str           # 缺失的一环
+    detected_by: str
+    detected_at: str
+
+
 def asdict(obj) -> dict:
     return dataclasses.asdict(obj)

@@ -10,6 +10,13 @@ class Role(str, Enum):
     REVIEWER = "reviewer"
     QUALITY_AUTHORITY = "quality_authority"
     AUDITOR = "auditor"
+    ARCHIVIST = "archivist"  # 档案员：从成品反查材料谱系
+
+
+class LineageNodeKind(str, Enum):
+    RAW_MATERIAL = "raw_material"  # 原始材料
+    INTERMEDIATE = "intermediate"  # 中间产物（经中间处理环节得到）
+    PRODUCT = "product"            # 成品（反查入口）
 
 
 class MaterialKind(str, Enum):

@@ -394,6 +394,52 @@ class ApiHandler(BaseHTTPRequestHandler):
             ),
         )
 
+    # --------------------------------------------------------- 材料谱系
+    def register_lineage_node(self) -> None:
+        actor = self._actor()
+        body = self._read_json()
+        result = self.services.lineage.register_node(
+            actor,
+            kind=body["kind"],
+            name=body["name"],
+            detail=body.get("detail"),
+            node_id=body.get("node_id"),
+            idempotency_key=self._idempotency_key(),
+        )
+        self._send_json(201, result)
+
+    def register_lineage_edge(self) -> None:
+        actor = self._actor()
+        body = self._read_json()
+        result = self.services.lineage.register_edge(
+            actor,
+            child_id=body["child_id"],
+            parent_id=body["parent_id"],
+            process=body["process"],
+            idempotency_key=self._idempotency_key(),
+        )
+        self._send_json(201, result)
+
+    def trace_lineage(self) -> None:
+        # 反查会把新发现的断点追加落库，故用 POST 而非 GET
+        actor = self._actor()
+        body = self._read_json()
+        self._send_json(
+            200,
+            self.services.lineage.trace_origins(
+                actor,
+                product_id=body["product_id"],
+                idempotency_key=self._idempotency_key(),
+            ),
+        )
+
+    def list_lineage_breaks(self, node_id: str) -> None:
+        actor = self._actor()
+        self._send_json(
+            200,
+            {"breaks": self.services.lineage.list_breaks(actor, node_id=node_id)},
+        )
+
 
 # 路由表：方法 -> [(路径模式, 处理方法名)]
 def _routes() -> dict[str, list[tuple[str, str]]]:
@@ -413,6 +459,9 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
         ("/v1/requests/{request_id}/respond", "respond_request"),
         ("/v1/requests/{request_id}/objections", "create_objection"),
         ("/v1/requests/{request_id}/verdict", "submit_verdict"),
+        ("/v1/lineage/nodes", "register_lineage_node"),
+        ("/v1/lineage/edges", "register_lineage_edge"),
+        ("/v1/lineage/trace", "trace_lineage"),
     ]
     get = [
         ("/v1/materials/{material_id}", "get_material"),
@@ -420,6 +469,7 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
         ("/v1/packages", "list_packages"),
         ("/v1/packages/{package_id}", "get_package"),
         ("/v1/packages/{package_id}/requests", "list_requests"),
+        ("/v1/lineage/nodes/{node_id}/breaks", "list_lineage_breaks"),
         (
             "/v1/packages/{package_id}/entries/{version_id}/content",
             "download_entry",

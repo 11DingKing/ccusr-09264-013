@@ -18,6 +18,9 @@ from ..domain.fingerprint import digest_bytes
 from ..domain.models import (
     AuditEntry,
     Blob,
+    LineageBreak,
+    LineageEdge,
+    LineageNode,
     Material,
     MaterialVersion,
     Objection,
@@ -27,7 +30,7 @@ from ..domain.models import (
     User,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class SqliteRepository(Repository):
@@ -176,7 +179,42 @@ class SqliteRepository(Repository):
                     created_at  TEXT NOT NULL
                 );
 
-                PRAGMA user_version = 1;
+                -- 材料谱系：节点只能显式登记；边允许指向未登记的上游（断链）；
+                -- 断链由反查用例在 Python 侧发现后追加标记，绝不自动补造节点。
+                CREATE TABLE IF NOT EXISTS lineage_nodes (
+                    node_id        TEXT PRIMARY KEY,
+                    institution_id TEXT NOT NULL,
+                    kind           TEXT NOT NULL,
+                    name           TEXT NOT NULL,
+                    detail_json    TEXT NOT NULL DEFAULT '{}',
+                    created_by     TEXT NOT NULL,
+                    created_at     TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS lineage_edges (
+                    edge_id     TEXT PRIMARY KEY,
+                    child_id    TEXT NOT NULL REFERENCES lineage_nodes(node_id),
+                    parent_id   TEXT NOT NULL,
+                    process     TEXT NOT NULL,
+                    recorded_by TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_lineage_edges_child
+                    ON lineage_edges(child_id);
+                CREATE INDEX IF NOT EXISTS idx_lineage_edges_parent
+                    ON lineage_edges(parent_id);
+
+                CREATE TABLE IF NOT EXISTS lineage_breaks (
+                    break_id        TEXT PRIMARY KEY,
+                    edge_id         TEXT NOT NULL,
+                    child_id        TEXT NOT NULL,
+                    missing_node_id TEXT NOT NULL,
+                    detected_by     TEXT NOT NULL,
+                    detected_at     TEXT NOT NULL,
+                    UNIQUE(edge_id)  -- 同一断点只标记一次
+                );
+
+                PRAGMA user_version = 2;
             """
         )
 
@@ -667,6 +705,106 @@ class SqliteRepository(Repository):
             for r in rows
         ]
 
+    # ---------------------------------------------------------------- lineage
+    def insert_lineage_node(self, node: LineageNode) -> None:
+        self._conn.execute(
+            "INSERT INTO lineage_nodes(node_id, institution_id, kind, name,"
+            " detail_json, created_by, created_at) VALUES(?,?,?,?,?,?,?)",
+            (
+                node.node_id,
+                node.institution_id,
+                node.kind,
+                node.name,
+                json.dumps(node.detail, ensure_ascii=False),
+                node.created_by,
+                node.created_at,
+            ),
+        )
+
+    def get_lineage_node(self, node_id: str) -> LineageNode | None:
+        row = self._conn.execute(
+            "SELECT * FROM lineage_nodes WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        return None if row is None else _row_to_lineage_node(row)
+
+    def list_lineage_nodes(
+        self, institution_id: str | None = None
+    ) -> list[LineageNode]:
+        if institution_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM lineage_nodes ORDER BY created_at, node_id"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM lineage_nodes WHERE institution_id = ?"
+                " ORDER BY created_at, node_id",
+                (institution_id,),
+            ).fetchall()
+        return [_row_to_lineage_node(r) for r in rows]
+
+    def insert_lineage_edge(self, edge: LineageEdge) -> None:
+        self._conn.execute(
+            "INSERT INTO lineage_edges(edge_id, child_id, parent_id, process,"
+            " recorded_by, recorded_at) VALUES(?,?,?,?,?,?)",
+            (
+                edge.edge_id,
+                edge.child_id,
+                edge.parent_id,
+                edge.process,
+                edge.recorded_by,
+                edge.recorded_at,
+            ),
+        )
+
+    def list_lineage_edges_by_child(self, child_id: str) -> list[LineageEdge]:
+        rows = self._conn.execute(
+            "SELECT * FROM lineage_edges WHERE child_id = ?"
+            " ORDER BY recorded_at, edge_id",
+            (child_id,),
+        ).fetchall()
+        return [_row_to_lineage_edge(r) for r in rows]
+
+    def record_lineage_break(self, brk: LineageBreak) -> bool:
+        cur = self._conn.execute(
+            "INSERT OR IGNORE INTO lineage_breaks(break_id, edge_id, child_id,"
+            " missing_node_id, detected_by, detected_at) VALUES(?,?,?,?,?,?)",
+            (
+                brk.break_id,
+                brk.edge_id,
+                brk.child_id,
+                brk.missing_node_id,
+                brk.detected_by,
+                brk.detected_at,
+            ),
+        )
+        return cur.rowcount == 1
+
+    def list_lineage_breaks(
+        self, node_id: str | None = None
+    ) -> list[LineageBreak]:
+        if node_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM lineage_breaks ORDER BY detected_at, break_id"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM lineage_breaks"
+                " WHERE child_id = ? OR missing_node_id = ?"
+                " ORDER BY detected_at, break_id",
+                (node_id, node_id),
+            ).fetchall()
+        return [
+            LineageBreak(
+                break_id=r["break_id"],
+                edge_id=r["edge_id"],
+                child_id=r["child_id"],
+                missing_node_id=r["missing_node_id"],
+                detected_by=r["detected_by"],
+                detected_at=r["detected_at"],
+            )
+            for r in rows
+        ]
+
 
 def _row_to_user(row: sqlite3.Row) -> User:
     return User(
@@ -716,4 +854,27 @@ def _row_to_entry(row: sqlite3.Row) -> PackageEntry:
         kind=row["kind"],
         sensitivity=row["sensitivity"],
         added_at=row["added_at"],
+    )
+
+
+def _row_to_lineage_node(row: sqlite3.Row) -> LineageNode:
+    return LineageNode(
+        node_id=row["node_id"],
+        institution_id=row["institution_id"],
+        kind=row["kind"],
+        name=row["name"],
+        detail=json.loads(row["detail_json"]),
+        created_by=row["created_by"],
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_lineage_edge(row: sqlite3.Row) -> LineageEdge:
+    return LineageEdge(
+        edge_id=row["edge_id"],
+        child_id=row["child_id"],
+        parent_id=row["parent_id"],
+        process=row["process"],
+        recorded_by=row["recorded_by"],
+        recorded_at=row["recorded_at"],
     )
