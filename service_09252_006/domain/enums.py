@@ -10,6 +10,7 @@ class Role(str, Enum):
     REVIEWER = "reviewer"
     QUALITY_AUTHORITY = "quality_authority"
     AUDITOR = "auditor"
+    ARCHIVIST = "archivist"  # 档案员：从成品反查材料谱系（跨机构只读）
 
 
 class MaterialKind(str, Enum):

@@ -12,6 +12,7 @@ from contextlib import AbstractContextManager
 from ..domain.models import (
     AuditEntry,
     Blob,
+    BrokenLinkMark,
     Material,
     MaterialVersion,
     Objection,
@@ -148,3 +149,16 @@ class Repository(abc.ABC):
     def list_audit(
         self, package_id: str | None = None, limit: int = 200
     ) -> list[AuditEntry]: ...
+
+    # ---- 材料谱系断链标记 ----
+    @abc.abstractmethod
+    def mark_broken_link(self, mark: BrokenLinkMark) -> bool:
+        """登记一处谱系断链；同一成品内同一缺口只记一次。
+
+        返回 True 表示本次新标记，False 表示此前已标记（幂等回放）。
+        本方法只追加断链标记，绝不创建任何材料/版本记录。
+        """
+
+    @abc.abstractmethod
+    def list_broken_links(self, package_id: str) -> list[BrokenLinkMark]:
+        """某成品谱系中已登记的断链标记（按标记时间升序）。"""

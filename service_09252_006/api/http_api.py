@@ -306,6 +306,24 @@ class ApiHandler(BaseHTTPRequestHandler):
             },
         )
 
+    # ----------------------------------------------------- 材料谱系
+    def get_lineage(self, package_id: str) -> None:
+        actor = self._actor()
+        self._send_json(
+            200, self.services.genealogy.trace_package(actor, package_id=package_id)
+        )
+
+    def get_lineage_breaks(self, package_id: str) -> None:
+        actor = self._actor()
+        self._send_json(
+            200,
+            {
+                "broken_links": self.services.genealogy.list_broken_links(
+                    actor, package_id=package_id
+                )
+            },
+        )
+
     # ----------------------------------------------------------- 评审
     def assign(self, package_id: str) -> None:
         actor = self._actor()
@@ -420,6 +438,8 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
         ("/v1/packages", "list_packages"),
         ("/v1/packages/{package_id}", "get_package"),
         ("/v1/packages/{package_id}/requests", "list_requests"),
+        ("/v1/packages/{package_id}/lineage", "get_lineage"),
+        ("/v1/packages/{package_id}/lineage/breaks", "get_lineage_breaks"),
         (
             "/v1/packages/{package_id}/entries/{version_id}/content",
             "download_entry",

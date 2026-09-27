@@ -18,6 +18,7 @@ from ..domain.fingerprint import digest_bytes
 from ..domain.models import (
     AuditEntry,
     Blob,
+    BrokenLinkMark,
     Material,
     MaterialVersion,
     Objection,
@@ -27,7 +28,133 @@ from ..domain.models import (
     User,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+_SCHEMA_V1 = """
+    CREATE TABLE IF NOT EXISTS users (
+        user_id        TEXT PRIMARY KEY,
+        institution_id TEXT,
+        roles_json     TEXT NOT NULL,
+        display_name   TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS blobs (
+        sha256     TEXT PRIMARY KEY,
+        data       BLOB NOT NULL,
+        media_type TEXT NOT NULL,
+        size       INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS materials (
+        material_id        TEXT PRIMARY KEY,
+        institution_id     TEXT NOT NULL,
+        kind               TEXT NOT NULL,
+        sensitivity        TEXT NOT NULL,
+        title              TEXT NOT NULL,
+        current_version_id TEXT,
+        withdrawn          INTEGER NOT NULL DEFAULT 0,
+        created_at         TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS versions (
+        version_id              TEXT PRIMARY KEY,
+        material_id             TEXT NOT NULL REFERENCES materials(material_id),
+        institution_id          TEXT NOT NULL,
+        sha256                  TEXT NOT NULL,
+        size                    INTEGER NOT NULL,
+        media_type              TEXT NOT NULL,
+        version_no              INTEGER NOT NULL,
+        supersedes_version_id   TEXT,
+        created_by              TEXT NOT NULL,
+        created_at              TEXT NOT NULL,
+        withdrawn               INTEGER NOT NULL DEFAULT 0,
+        withdrawn_at            TEXT,
+        UNIQUE(material_id, version_no)
+    );
+
+    CREATE TABLE IF NOT EXISTS packages (
+        package_id            TEXT PRIMARY KEY,
+        institution_id        TEXT NOT NULL,
+        title                 TEXT NOT NULL,
+        status                TEXT NOT NULL,
+        created_by            TEXT NOT NULL,
+        created_at            TEXT NOT NULL,
+        sealed_at             TEXT,
+        manifest_fingerprint  TEXT,
+        decided_at            TEXT,
+        decision              TEXT,
+        decision_note         TEXT,
+        review_fingerprint    TEXT,
+        supersedes_package_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS entries (
+        entry_id    TEXT PRIMARY KEY,
+        package_id  TEXT NOT NULL REFERENCES packages(package_id),
+        material_id TEXT NOT NULL,
+        version_id  TEXT NOT NULL REFERENCES versions(version_id),
+        sha256      TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        sensitivity TEXT NOT NULL,
+        added_at    TEXT NOT NULL,
+        UNIQUE(package_id, version_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS requests (
+        request_id       TEXT PRIMARY KEY,
+        package_id       TEXT NOT NULL REFERENCES packages(package_id),
+        institution_id   TEXT NOT NULL,
+        reviewer_id      TEXT NOT NULL,
+        status           TEXT NOT NULL,
+        assigned_by      TEXT NOT NULL,
+        assigned_at      TEXT NOT NULL,
+        responded_at     TEXT,
+        completed_at     TEXT,
+        verdict          TEXT,
+        comment          TEXT,
+        deadline_at_utc  TEXT,
+        deadline_timezone TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_requests_reviewer
+        ON requests(reviewer_id, status);
+    CREATE INDEX IF NOT EXISTS idx_requests_package ON requests(package_id);
+
+    CREATE TABLE IF NOT EXISTS objections (
+        objection_id  TEXT PRIMARY KEY,
+        request_id    TEXT NOT NULL REFERENCES requests(request_id),
+        package_id    TEXT NOT NULL REFERENCES packages(package_id),
+        institution_id TEXT NOT NULL,
+        reviewer_id   TEXT NOT NULL,
+        category      TEXT NOT NULL,
+        detail        TEXT NOT NULL,
+        created_at    TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_log (
+        audit_id       TEXT PRIMARY KEY,
+        package_id     TEXT,
+        institution_id TEXT,
+        actor_id       TEXT NOT NULL,
+        action         TEXT NOT NULL,
+        at             TEXT NOT NULL,
+        detail_json    TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE TABLE IF NOT EXISTS idempotency (
+        idempotency_key TEXT PRIMARY KEY,
+        result_json     TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS api_tokens (
+        token       TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL REFERENCES users(user_id),
+        created_at  TEXT NOT NULL
+    );
+
+    PRAGMA user_version = 1;
+"""
 
 
 class SqliteRepository(Repository):
@@ -49,136 +176,29 @@ class SqliteRepository(Repository):
     # ---------------------------------------------------------------- schema
     def _ensure_schema(self) -> None:
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-        if version >= SCHEMA_VERSION:
-            return
-        # executescript 会自行提交事务；把 user_version 写入放在同一脚本
-        self._conn.executescript(
-            """
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id        TEXT PRIMARY KEY,
-                    institution_id TEXT,
-                    roles_json     TEXT NOT NULL,
-                    display_name   TEXT NOT NULL DEFAULT ''
+        if version < 1:
+            # executescript 会自行提交事务；把 user_version 写入放在同一脚本
+            self._conn.executescript(_SCHEMA_V1)
+        if version < 2:
+            # v2：材料谱系断链标记（只追加缺口标记，不补造任何实体）
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS lineage_breaks (
+                    break_id      TEXT PRIMARY KEY,
+                    package_id    TEXT NOT NULL,
+                    node_id       TEXT NOT NULL,
+                    missing_ref   TEXT NOT NULL,
+                    expected_kind TEXT NOT NULL,
+                    reason        TEXT NOT NULL,
+                    marked_by     TEXT NOT NULL,
+                    marked_at     TEXT NOT NULL,
+                    detail_json   TEXT NOT NULL DEFAULT '{}',
+                    UNIQUE(package_id, node_id)
                 );
 
-                CREATE TABLE IF NOT EXISTS blobs (
-                    sha256     TEXT PRIMARY KEY,
-                    data       BLOB NOT NULL,
-                    media_type TEXT NOT NULL,
-                    size       INTEGER NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS materials (
-                    material_id        TEXT PRIMARY KEY,
-                    institution_id     TEXT NOT NULL,
-                    kind               TEXT NOT NULL,
-                    sensitivity        TEXT NOT NULL,
-                    title              TEXT NOT NULL,
-                    current_version_id TEXT,
-                    withdrawn          INTEGER NOT NULL DEFAULT 0,
-                    created_at         TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS versions (
-                    version_id              TEXT PRIMARY KEY,
-                    material_id             TEXT NOT NULL REFERENCES materials(material_id),
-                    institution_id          TEXT NOT NULL,
-                    sha256                  TEXT NOT NULL,
-                    size                    INTEGER NOT NULL,
-                    media_type              TEXT NOT NULL,
-                    version_no              INTEGER NOT NULL,
-                    supersedes_version_id   TEXT,
-                    created_by              TEXT NOT NULL,
-                    created_at              TEXT NOT NULL,
-                    withdrawn               INTEGER NOT NULL DEFAULT 0,
-                    withdrawn_at            TEXT,
-                    UNIQUE(material_id, version_no)
-                );
-
-                CREATE TABLE IF NOT EXISTS packages (
-                    package_id            TEXT PRIMARY KEY,
-                    institution_id        TEXT NOT NULL,
-                    title                 TEXT NOT NULL,
-                    status                TEXT NOT NULL,
-                    created_by            TEXT NOT NULL,
-                    created_at            TEXT NOT NULL,
-                    sealed_at             TEXT,
-                    manifest_fingerprint  TEXT,
-                    decided_at            TEXT,
-                    decision              TEXT,
-                    decision_note         TEXT,
-                    review_fingerprint    TEXT,
-                    supersedes_package_id TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS entries (
-                    entry_id    TEXT PRIMARY KEY,
-                    package_id  TEXT NOT NULL REFERENCES packages(package_id),
-                    material_id TEXT NOT NULL,
-                    version_id  TEXT NOT NULL REFERENCES versions(version_id),
-                    sha256      TEXT NOT NULL,
-                    kind        TEXT NOT NULL,
-                    sensitivity TEXT NOT NULL,
-                    added_at    TEXT NOT NULL,
-                    UNIQUE(package_id, version_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS requests (
-                    request_id       TEXT PRIMARY KEY,
-                    package_id       TEXT NOT NULL REFERENCES packages(package_id),
-                    institution_id   TEXT NOT NULL,
-                    reviewer_id      TEXT NOT NULL,
-                    status           TEXT NOT NULL,
-                    assigned_by      TEXT NOT NULL,
-                    assigned_at      TEXT NOT NULL,
-                    responded_at     TEXT,
-                    completed_at     TEXT,
-                    verdict          TEXT,
-                    comment          TEXT,
-                    deadline_at_utc  TEXT,
-                    deadline_timezone TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_requests_reviewer
-                    ON requests(reviewer_id, status);
-                CREATE INDEX IF NOT EXISTS idx_requests_package ON requests(package_id);
-
-                CREATE TABLE IF NOT EXISTS objections (
-                    objection_id  TEXT PRIMARY KEY,
-                    request_id    TEXT NOT NULL REFERENCES requests(request_id),
-                    package_id    TEXT NOT NULL REFERENCES packages(package_id),
-                    institution_id TEXT NOT NULL,
-                    reviewer_id   TEXT NOT NULL,
-                    category      TEXT NOT NULL,
-                    detail        TEXT NOT NULL,
-                    created_at    TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS audit_log (
-                    audit_id       TEXT PRIMARY KEY,
-                    package_id     TEXT,
-                    institution_id TEXT,
-                    actor_id       TEXT NOT NULL,
-                    action         TEXT NOT NULL,
-                    at             TEXT NOT NULL,
-                    detail_json    TEXT NOT NULL DEFAULT '{}'
-                );
-
-                CREATE TABLE IF NOT EXISTS idempotency (
-                    idempotency_key TEXT PRIMARY KEY,
-                    result_json     TEXT NOT NULL,
-                    created_at      TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS api_tokens (
-                    token       TEXT PRIMARY KEY,
-                    user_id     TEXT NOT NULL REFERENCES users(user_id),
-                    created_at  TEXT NOT NULL
-                );
-
-                PRAGMA user_version = 1;
-            """
-        )
+                PRAGMA user_version = 2;
+                """
+            )
 
     @contextlib.contextmanager
     def _txn_direct(self) -> Iterator[None]:
@@ -667,6 +687,34 @@ class SqliteRepository(Repository):
             for r in rows
         ]
 
+    # ----------------------------------------------------- 谱系断链标记
+    def mark_broken_link(self, mark: BrokenLinkMark) -> bool:
+        cur = self._conn.execute(
+            "INSERT OR IGNORE INTO lineage_breaks(break_id, package_id, node_id,"
+            " missing_ref, expected_kind, reason, marked_by, marked_at, detail_json)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                mark.break_id,
+                mark.package_id,
+                mark.node_id,
+                mark.missing_ref,
+                mark.expected_kind,
+                mark.reason,
+                mark.marked_by,
+                mark.marked_at,
+                json.dumps(mark.detail, ensure_ascii=False),
+            ),
+        )
+        return cur.rowcount == 1
+
+    def list_broken_links(self, package_id: str) -> list[BrokenLinkMark]:
+        rows = self._conn.execute(
+            "SELECT * FROM lineage_breaks WHERE package_id = ?"
+            " ORDER BY marked_at, break_id",
+            (package_id,),
+        ).fetchall()
+        return [_row_to_broken_link(r) for r in rows]
+
 
 def _row_to_user(row: sqlite3.Row) -> User:
     return User(
@@ -716,4 +764,18 @@ def _row_to_entry(row: sqlite3.Row) -> PackageEntry:
         kind=row["kind"],
         sensitivity=row["sensitivity"],
         added_at=row["added_at"],
+    )
+
+
+def _row_to_broken_link(row: sqlite3.Row) -> BrokenLinkMark:
+    return BrokenLinkMark(
+        break_id=row["break_id"],
+        package_id=row["package_id"],
+        node_id=row["node_id"],
+        missing_ref=row["missing_ref"],
+        expected_kind=row["expected_kind"],
+        reason=row["reason"],
+        marked_by=row["marked_by"],
+        marked_at=row["marked_at"],
+        detail=json.loads(row["detail_json"]),
     )

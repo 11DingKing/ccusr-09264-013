@@ -146,5 +146,51 @@ class AuditEntry:
     detail: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class GenealogyNode:
+    """谱系中的一个环节（成品 / 中间处理 / 原始材料）。
+
+    kind 取值见 domain.genealogy.NodeKind。node_id 是该环节在谱系内的
+    稳定标识（包 id / 版本 id / 断链占位 id）。
+    """
+
+    node_id: str
+    kind: str
+    label: str
+    detail: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class GenealogyEdge:
+    """一条溯源关系：from_id 处的记录引用了 to_id 处的上游环节。
+
+    方向与数据库引用一致（成品 → 版本 → 前版/原始材料），档案员反查时
+    沿 from → to 逐环向上游走。
+    """
+
+    from_id: str     # 下游（更接近成品）持有的引用
+    to_id: str       # 上游（更接近原始材料）被引用的环节
+    relation: str    # EdgeRelation
+
+
+@dataclass
+class BrokenLinkMark:
+    """谱系断链标记：缺失的一环，只记录缺口本身，绝不凭空补齐。
+
+    标记持久化在 SQLite（lineage_breaks 表），反复查询同一缺口只追加一次。
+    missing_ref 是断链指向却找不到实体的引用（如缺失的版本 id / 材料 id）。
+    """
+
+    break_id: str
+    package_id: str
+    node_id: str                 # 谱系内占位节点 id
+    missing_ref: str             # 断链处引用但查无实体的标识
+    expected_kind: str           # 期望缺失环节的类型（NodeKind）
+    reason: str                  # 断链原因（lineage_reason 常量）
+    marked_by: str
+    marked_at: str
+    detail: dict = field(default_factory=dict)
+
+
 def asdict(obj) -> dict:
     return dataclasses.asdict(obj)
